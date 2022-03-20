@@ -1,0 +1,466 @@
+---
+title: "Covid Cases in St. Lawrence County"
+author: "created by Caroline Krall (SLU Class of 2021)"
+output: 
+  flexdashboard::flex_dashboard:
+      includes:
+        in_header: google-analytics.html
+runtime: shiny
+resource_files:
+- active/SLC_Civil_Boundaries_SHP/slc.dbf
+- active/SLC_Civil_Boundaries_SHP/slc.prj
+- active/SLC_Civil_Boundaries_SHP/slc.shx
+---
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(shiny)
+library(readr)
+library(tidyr)
+library(dplyr)
+library(ggplot2)
+#library(tidyverse)
+#library(choroplethr) # do we still use this?
+#library(choroplethrMaps) # do we still use this?
+library(leaflet)
+library(sf)
+library(DT)
+library(shinyBS)
+library(plotly)
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# data import and tidying
+active <- read_csv("https://raw.githubusercontent.com/iramler/stlawu_covid/main/slc_towns_active_cases.csv", n_max = 34)
+tcases <- read_csv("https://raw.githubusercontent.com/iramler/stlawu_covid/main/slc_towns_total_cases.csv", n_max = 34)
+
+shp <- sf::read_sf("active/SLC_Civil_Boundaries_SHP/slc.shp")
+
+# transform to lat lon style first
+shp <- st_transform(shp, 4326)
+
+# st_centroid finds centers, st_coordinates will pull the individual pieces out
+shp_centroids <-
+shp %>% st_centroid() %>% 
+  select("NAME", "geometry") %>%
+  mutate(
+  lat = st_coordinates(geometry)[,1],
+  lon = st_coordinates(geometry)[,2]
+)
+# can then add these to the leaflet as a layer
+
+
+active[is.na(active)] = 0
+tcases[is.na(tcases)] = 0
+
+county_active <-
+  active %>%
+  dplyr::slice(34)
+
+county_total <-
+  tcases %>%
+  dplyr::slice(34)
+
+active <-
+  active %>%
+  dplyr::slice(1:33)
+
+tcases <-
+  tcases %>%
+  dplyr::slice(1:33)
+
+active <- gather(data = active, key = date, value = cases, contains("/"))
+tcases <- gather(data = tcases, key = date, value = tcases, contains("/"))
+
+covid <- right_join(active, tcases, by = c("date", "Order", "NAME"))
+covid$date <- parse_date(covid$date, format = "%m/%d/%Y")
+
+
+date <- seq(from = as.Date("2020-08-19"), to = max(covid$date), by = "day")
+date <- as.data.frame(date, col.names = c("date"))
+
+town <-
+covid %>%
+  dplyr::select(NAME)%>%
+  distinct(NAME)
+
+NAME <- as.vector(town)
+
+date <- date %>%
+  expand(date, NAME)
+
+covid <- left_join(date, covid, by = c("date", "NAME"))
+
+
+covid <- covid %>%
+  group_by(NAME)%>%
+  arrange(date)%>%
+  fill(cases, tcases)%>%
+  mutate(lagged_total = lag(tcases, 7),
+         runavg7 = (tcases - lagged_total)/7,
+         new = (tcases - lag(tcases, 1))
+         )
+
+
+shp <- right_join(shp, covid, by = "NAME")
+shp<-
+    shp %>%
+    mutate(
+        st_tcases10 = (tcases/POP2010)*10000,
+        st_cases10 = (cases/POP2010)*10000,
+        st_k710 = (runavg7/POP2010)*10000,
+        st_tcases100 = (tcases/POP2010)*100000,
+        st_cases100 = (cases/POP2010)*100000,
+        st_k7100 = (runavg7/POP2010)*100000,
+        new10 = (new/POP2010)*10000,
+        new100 = (new/POP2010)*100000
+    )
+
+# I moved this to earlier
+# shp <- st_transform(shp, 4326)
+
+pal_fun <- colorNumeric("Reds", domain = NULL)
+#pal_fun2 <- colorNumeric("YlOrRd", domain = NULL)
+pal_fun2 <- colorNumeric("PuRd", domain = NULL)
+pal_fun3 <- colorNumeric("RdPu", domain = NULL)
+pal_fun4 <- colorNumeric("BuPu", domain = NULL)
+
+
+```
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+# County level data
+
+county_active <- gather(data = county_active, key = date, value = cases, contains("/"))
+county_total <- gather(data = county_total, key = date, value = tcases, contains("/"))
+
+county <- right_join(county_active, county_total, by = c("date", "Order", "NAME"))
+county$date <- parse_date(county$date, format = "%m/%d/%Y")
+
+
+date <- seq(from = as.Date("2020-08-19"), to = max(county$date), by = "day")
+date <- as.data.frame(date, col.names = c("date"))
+
+town <-
+county %>%
+  dplyr::select(NAME)%>%
+  distinct(NAME)
+
+NAME <- as.vector(town)
+
+date <- date %>%
+  expand(date, NAME)
+
+county <- left_join(date, county, by = c("date", "NAME"))
+
+
+county <- county %>%
+  group_by(NAME)%>%
+  arrange(date)%>%
+  fill(cases, tcases)%>%
+  mutate(lagged_total = lag(tcases, 7),
+         runavg7 = (tcases - lagged_total)/7,
+         new = (tcases - lag(tcases, 1))
+         )
+```
+
+
+
+Inputs {.sidebar}
+-------------------------------------
+
+```{r leaf, echo=FALSE}
+inputPanel(
+  dateInput("date", label = h3("Date input"), value = max(covid$date)),
+  
+  selectInput("checkbox", label = h3("Standardize by Population"), choices = list("Raw Case Numbers" = 1, "Standardized per 10,000" = 2, "Standardized per 100,000" = 3), selected = 2),
+            
+  selectInput("select", label = h3("Select a Plot"), choices = list("Active Cases" = 1, "Total Cases" = 2, "7 Day Running Average" = 3, "New Cases" = 4), selected = 2),
+  
+bsTooltip(id = "date", title = "The data displayed will be for the most recent day with data available. If the date you select is a weekend day, then the data from Friday will be displayed", placement = "bottom", trigger = "hover",
+  options = NULL),
+
+bsTooltip(id = "checkbox", title = "Pick a standardization level. When standardized to cases per 10,000 people, all the towns show what their case numbers would be if they were roughly the same size as Canton. Cases per 100,000 people is a common measure used by other apps, and it also is roughly the population size of the county as a whole.", placement = "top", trigger = "hover",
+  options = NULL)
+
+        )
+
+HTML('<p>Questions or comments - please direct them to  <a href="https://www.stlawu.edu/people/ivan-ramler" target="_blank">Ivan Ramler</a>, Associate Professor of Statistics, St. Lawrence University</p>')
+
+
+HTML('<p>Data is taken from the  <a href="https://www.stlawco.org/covid-19-daily-update-center" target="_blank">St. Lawrence County Public Health Department\'s COVID-19 Information and Update Center</a>. The data is typically updated M-F evenings.</p>')
+
+
+```
+
+Column {.tabset}
+-------------------------------------
+    
+### Covid Cases in SLC
+```{r}
+selectedData <- reactive({
+   if (input$checkbox == 1) {
+            shp$x = shp$cases
+            shp$t = shp$tcases
+            shp$k7 <- shp$runavg7
+            shp$new = shp$new
+            
+            }
+        else if (input$checkbox == 2){
+           shp$x <- shp$st_cases10
+            shp$t <- shp$st_tcases10
+            shp$k7 <- shp$st_k710
+            shp$new = shp$new10
+        }
+  
+ else if (input$checkbox == 3){
+           shp$x <- shp$st_cases100
+            shp$t <- shp$st_tcases100
+            shp$k7 <- shp$st_k7100
+            shp$new = shp$new100
+ }
+  
+    shp_onedate <-
+        shp%>%
+        filter(date == input$date)
+        shp_onedate })
+
+```
+
+<!--
+There are currently  total cases with 600 active cases. The 7 day running average is 65. 
+-->
+
+```{r}
+
+std_names <- c("none (Raw Cases)","per 10,000 people","per 100,000 people")
+
+renderLeaflet({
+
+p_popup <- paste0("<strong> Town Name: </strong>", (selectedData()$NAME), "<br/><strong>Standardization: </strong>", std_names[as.numeric(input$checkbox)],"<br/><strong>Active Cases: </strong>", (round((selectedData()$x), digits = 1)), "<br/><strong>Total Cases: </strong>", (round((selectedData()$t), digits = 1)), "<br/><strong>7 Day Running Average: </strong>", (round((selectedData()$k7), digits =1)), "<br/><strong>New Cases: </strong>", (round((selectedData()$new), digits =1)))
+
+        
+  if (input$select == 1) {leaflet(selectedData())%>%
+  addPolygons(
+    stroke = TRUE,
+    opacity = 1,
+    color = "black",
+    weight = 1,
+    fillOpacity = 0.5,
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE),
+    fillColor = ~pal_fun3(selectedData()$x),
+    popup = p_popup) %>%
+  addTiles()%>%
+      addLabelOnlyMarkers(data = shp_centroids, ~lat, ~lon, group = "Town Names", label = ~NAME, labelOptions = labelOptions(noHide = T, textOnly = T, direction = "top", offset = c(0, 17)))%>%
+    addLayersControl(
+    overlayGroups = "Town Names",
+    options = layersControlOptions(collapsed = FALSE)
+  )%>%
+      addLegend("bottomright", pal = pal_fun3, values = ~x,
+    title = "Active Cases",
+    opacity = 1
+  )}
+        
+        else if (input$select == 2) {leaflet(selectedData())%>%
+  addPolygons(
+    stroke = TRUE,
+    opacity = 1,
+    color = "black",
+    weight = 1,
+    fillOpacity = 0.5,
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE),
+    fillColor = ~pal_fun(selectedData()$t),
+    popup = p_popup) %>%
+  addTiles()%>%
+    addLabelOnlyMarkers(data = shp_centroids, ~lat, ~lon, group = "Town Names", label = ~NAME, labelOptions = labelOptions(noHide = T, textOnly = T, direction = "top", offset = c(0, 17)))%>%
+    addLayersControl(
+    overlayGroups = "Town Names",
+    options = layersControlOptions(collapsed = FALSE)
+  )%>%
+    addLegend("bottomright", pal = pal_fun, values = ~t,
+    title = "Total Cases",
+    opacity = 1
+  )}
+        
+        else if (input$select == 3) {leaflet(selectedData())%>%
+  addPolygons(
+    stroke = TRUE,
+    opacity = 1,
+    color = "black",
+    weight = 1,
+    fillOpacity = 0.5,
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE),
+    fillColor = ~pal_fun2(selectedData()$k7),
+    popup = p_popup) %>%
+  addTiles()%>%
+    addLabelOnlyMarkers(data = shp_centroids, ~lat, ~lon, group = "Town Names", label = ~NAME, labelOptions = labelOptions(noHide = T, textOnly = T, direction = "top", offset = c(0, 17)))%>%
+    addLayersControl(
+    overlayGroups = "Town Names",
+    options = layersControlOptions(collapsed = FALSE)
+  )%>%
+    addLegend("bottomright", pal = pal_fun2, values = ~k7,
+    title = "7 Day Rolling Average",
+    opacity = 1
+    )}
+else if (input$select == 4) {leaflet(selectedData())%>%
+  addPolygons(
+    stroke = TRUE,
+    opacity = 1,
+    color = "black",
+    weight = 1,
+    fillOpacity = 0.5,
+    highlightOptions = highlightOptions(color = "white", weight = 2,
+      bringToFront = TRUE),
+    fillColor = ~pal_fun4(selectedData()$new),
+    popup = p_popup) %>%
+  addTiles()%>%
+    addLabelOnlyMarkers(data = shp_centroids, ~lat, ~lon, group = "Town Names", label = ~NAME, labelOptions = labelOptions(noHide = T, textOnly = T, direction = "top", offset = c(0, 17)))%>%
+    addLayersControl(
+    overlayGroups = "Town Names",
+    options = layersControlOptions(collapsed = FALSE)
+  )%>%
+      addLegend("bottomright", pal = pal_fun4, values = ~new,
+    title = "New Cases",
+    opacity = 1
+  )}
+
+})
+```
+
+### Data Table
+
+This data table shows the active, total, and new case totals, as well as the 7 day running average, **standardized for whatever population value is selected in the input panel.** They show these values for whatever date is selected.  Note that when adjusting for population, small changes in covid-19 cases can create large swings in values for towns with small populations (e.g., Clare).
+
+
+```{r}
+renderDT({
+  y <- 
+    data.frame(NAME = selectedData()$NAME, POPULATION = selectedData()$POP2010,cases = selectedData()$x,
+               tcases = selectedData()$t, k7 = selectedData()$k7, new = selectedData()$new
+               )
+  
+  caption_blurb = ''
+ if (input$checkbox == 1) {
+   caption_blurb = "Displaying Raw Case Numbers"
+
+            }
+        else if (input$checkbox == 2){
+             caption_blurb = "Displaying Case Numbers per 10,000 people"
+
+        }
+  
+        else if (input$checkbox == 3){
+             caption_blurb = "Displaying Case Numbers per 100,000 people"
+
+          }
+  
+  
+datatable(y, extensions = 'Scroller', colnames = c('Town Name', 'Population','Active Cases', 'Total Cases', '7 Day Running Average', 'New Cases'), 
+          caption = caption_blurb,
+          
+          options = list(
+  deferRender = TRUE,
+  scrollY = 400,
+  scroller = TRUE), rownames = FALSE) %>%
+    formatRound(
+      #columns = c(2:5),
+      columns = c(3:6),
+      digits = 0
+    )
+  })
+```
+
+### County Numbers
+
+```{r}
+co_date <-
+  county %>%
+  mutate(runavg7 = round(runavg7, 2)) %>%
+  filter(date == max(county$date)) %>%
+  dplyr::select(NAME, date, cases, tcases, runavg7, new)
+
+datatable(co_date, colnames = c('Town Name', 'Date', 'Active Cases', 'Total Cases', '7 Day Running Average', 'New Cases'), rownames = FALSE)
+```
+
+
+### County Trend
+
+```{r}
+county <-
+  county %>%
+  mutate(runavg7 = round(runavg7, 2))
+  
+  
+co_trend <-
+county %>%
+  ggplot(aes(x= date, y = runavg7)) + geom_line() + geom_smooth(span = 0.15, se = FALSE) + 
+  geom_point(aes(
+             text = paste('<br>Date: ', as.Date(date),
+                 '<br>7-day average: ', round(runavg7,2))
+               ), size = .5) +
+  
+  labs(x = "Date", y = "7 Day Running Average") + theme(axis.text.x = element_text(angle = 45)) + theme_bw()
+
+ggplotly(co_trend,tooltip = c("text"))
+```
+
+### Trends by Town
+These graphs show the trend in 7 day running average by town, **standardized by whatever population value is selected in the input panel.**
+
+```{r}
+
+
+```
+
+
+```{r}
+
+output$townplots  <- renderPlot ({
+  
+  caption_blurb = ''
+if (input$checkbox == 1) {
+   caption_blurb = "Raw Case Numbers"
+   } else if (input$checkbox == 2){
+             caption_blurb = "Case Numbers per 10,000 people"
+   } else if (input$checkbox == 3){
+             caption_blurb = "Case Numbers per 100,000 people"
+             }
+  
+caption_blurb <- paste("You care currently viewing plots based on",caption_blurb)
+  
+  if (input$checkbox == 1) {
+    shp %>%
+  ggplot(aes(x= date, y = runavg7)) + geom_smooth(span = 0.2, se = FALSE)  + geom_line() +
+  facet_wrap(vars(NAME), ncol = 3, scales = "free") + 
+  labs(x = "Date", y = "7 Day Running Average") + theme_bw() + theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), strip.text = element_text(size = 20)) + ggtitle(caption_blurb)
+  }
+  
+  else if (input$checkbox == 2) {
+    shp %>%
+  ggplot(aes(x= date, y = st_k710)) + geom_smooth(span = 0.3, se = FALSE)  + 
+  facet_wrap(vars(NAME), ncol = 3, scales = "free_x") + 
+  labs(x = "Date", y = "7 Day Running Average") + theme_bw() + theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), strip.text = element_text(size = 20))  + ggtitle(caption_blurb)
+  }
+
+  else if (input$checkbox == 3) {
+    shp %>%
+  ggplot(aes(x= date, y = st_k7100)) + geom_smooth(span = 0.25, se = FALSE) +
+  facet_wrap(vars(NAME), ncol = 3, scales = "free_x") + 
+  labs(x = "Date", y = "7 Day Running Average") + theme_bw() + theme(axis.text.x = element_text(size = 14), axis.text.y = element_text(size = 14), strip.text = element_text(size = 20))  + ggtitle(caption_blurb)
+  }
+
+
+}, height = 2000)
+
+# https://stackoverflow.com/questions/29693102/how-to-control-plot-height-size-in-interactive-rmarkdown-with-shiny
+# might be able to force the figure size to be taller
+```
+
+```{r}
+renderUI({
+ div(style='max-height:500px; overflow-y: scroll; position: relative',plotOutput("townplots"))
+#  plotlyOutput("townplots")
+})
+```
